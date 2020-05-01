@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns="http://java.sun.com/xml/ns/javaee" xmlns:web="http://java.sun.com/xml/ns/javaee/web-app_2_5.xsd"
+	xsi:schemaLocation="http://java.sun.com/xml/ns/javaee http://java.sun.com/xml/ns/javaee/web-app_3_0.xsd"
+	id="WebApp_ID" version="3.0">
+
+
+	<display-name>Archetype Created Web Application</display-name>
+
+   
+    <!--  This is one of the way to expose your Rest Resources -->
+	<!--  Auto scan REST service 
+	<context-param>
+		<param-name>resteasy.scan</param-name>
+		<param-value>true</param-value>
+	</context-param>
+--> 
+
+	<!--   this need same with resteasy servlet url-pattern --> 
+	<context-param>
+		<param-name>resteasy.servlet.mapping.prefix</param-name>
+		<param-value>/webapi</param-value>
+	</context-param>
+    
+	<servlet>
+
+		<!-- REST Easy boostraps the application from this servlet 
+		
+		    Since this application 
+			is std web application So it needs a init servlet to start the application 
+			So Init servlet of restesy "HttpServletDispatcher" gets initialised at start 
+			of your application. RestEasy will lookup all the resources after the servlet 
+			path "/webapi/" -->
+
+		<servlet-name>resteasy-servlet</servlet-name>
+		<servlet-class>
+			org.jboss.resteasy.plugins.server.servlet.HttpServletDispatcher
+		</servlet-class>
+
+		<!-- We need to mention RESTEasy where to lookup all the resources 
+		
+		     <param-value> : Class name where we need to register all the rest resources.
+		-->
+		<init-param>
+			<param-name>javax.ws.rs.Application</param-name>
+			<param-value>com.resteasy.practice.MessangerApp</param-value>
+		</init-param>
+		<load-on-startup>1</load-on-startup>
+	</servlet>
+
+	<servlet-mapping>
+		<servlet-name>resteasy-servlet</servlet-name>
+		<url-pattern>/webapi/*</url-pattern>
+	</servlet-mapping>
+
+</web-app>
