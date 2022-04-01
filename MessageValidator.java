@@ -1,0 +1,824 @@
+package com.alacriti.paymenthub.request.validator;
+
+import java.lang.reflect.Field;
+import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.alacriti.paymenthub.constants.ValidationConstants;
+import com.alacriti.paymenthub.field.FieldValidatorFactory;
+import com.alacriti.paymenthub.field.validator.IFieldSemanticValidator;
+import com.alacriti.paymenthub.field.validator.IFieldValidator;
+import com.alacriti.paymenthub.util.FieldUtil;
+import com.alacriti.paymenthub.util.ValidatorUtil;
+import com.alacriti.paymenthub.vo.FieldConfig;
+import com.alacriti.paymenthub.vo.FieldDataType;
+import com.alacriti.paymenthub.vo.VldnError;
+import com.alacriti.yaf.util.CollectionUtil;
+
+/**
+ * This utility class is used to validate a given Instruction. 
+ * 
+ * @since 1.0.0
+ * @author ajinkyab
+ *
+ */
+public class MessageValidator {
+    
+    protected static final Logger log = LoggerFactory.getLogger(MessageValidator.class);
+    
+    protected static Pattern filterExpressionPattern = Pattern.compile("\\[(.*?)\\]");
+    
+    /*
+     *  After testing, Identified some constraints:
+     *  
+     *  1. If we want to enforce a field of type List to receive only 1 element in the list then this field 
+     *  has to make mandatory. For optional field, this rule will not work.
+     */
+    
+    /**
+     *  Validates the given input Request Object Fields
+     * @param instrId
+     * @param request
+     * @return List<{@link VldnError}> of Error
+     */
+    public static List<VldnError> validate(Long instrId, Object request) {
+        List<VldnError> errorCodes = new ArrayList<VldnError>();
+        Map<String, Object> extractedFields = new HashMap<String, Object>();
+        LocalTime validationStartTime = LocalTime.now();
+        try {
+            log.info(
+                    "\n *************** Start of Message Validation for InstrId: {} ****************** StartTime: {} ***",
+                    instrId, validationStartTime);
+            List<FieldConfig> fieldConfigList = FieldUtil.getFieldConfigList(instrId);
+            
+            if (fieldConfigList == null || fieldConfigList.isEmpty()) {
+                log.warn("Field Config received is empty against instrId:" + instrId + " so can't proceed further.. ");
+                return errorCodes;
+            }
+            extractedFields = extractFieldValues(fieldConfigList, request);
+            for (FieldConfig fieldConfig : fieldConfigList) {
+                if (log.isDebugEnabled())
+                    log.debug("\n *************** Start Validation of field: {} *********************",
+                            fieldConfig.getFinalExtFieldPath());
+                
+                Optional<String> errorCode = validateExtractedFieldValue(fieldConfig, extractedFields,
+                        extractedFields.get(fieldConfig.getFinalExtFieldPath()));
+                
+                Object objVal = extractedFields.get(fieldConfig.getFinalExtFieldPath());
+                errorCode.ifPresent(error -> addToVldnError(errorCodes, error, fieldConfig, objVal));
+                
+                if (errorCode.isPresent()) {
+                    logErrorCodeSummary(fieldConfig, errorCode.get(), objVal);
+                }
+                
+            }
+        } catch (SecurityException | IllegalArgumentException | IllegalAccessException e) {
+            log.error("Category Exception occured at validate() with Message:\n" + e.getMessage(), e);
+            return addError(errorCodes, ValidationConstants.ErrorConstants.SYSTEM_ERROR);
+        } catch (Exception e) {
+            log.error("Exception occured at validate() with Message:\n" + e.getMessage(), e);
+            return addError(errorCodes, ValidationConstants.ErrorConstants.SYSTEM_ERROR);
+        } catch (Throwable t) {
+            log.error("Throwable occured at validate() with Message:\n" + t.getMessage(), t);
+            return addError(errorCodes, ValidationConstants.ErrorConstants.SYSTEM_ERROR);
+        } finally {
+            if (!CollectionUtil.isEmpty(errorCodes)) {
+                errorCodes.stream().forEach(e -> printErrorCode(e));
+            } else {
+                log.info("No Validation errors occured for InstrId : {} ", instrId);
+            }
+            
+            LocalTime validationEndTime = LocalTime.now();
+            log.info(
+                    "\n *************** End of Message Validation for InstrId : {} ****************** EndTime: {} *** "
+                            + "\n *************** Elapsed Time for Validating : {} seconds and {} millis ******************",
+                    instrId, validationEndTime, ChronoUnit.SECONDS.between(validationStartTime,
+                            validationEndTime),
+                    (ChronoUnit.MILLIS.between(validationStartTime, validationEndTime) % 1000));
+        }
+        return errorCodes;
+    }
+    
+    protected static void logErrorCodeSummary(FieldConfig fieldConfig, String error, Object objVal) {
+        
+        String errorType = error.equals(fieldConfig.getEmptyFieldErrorCode())
+                ? ValidationConstants.FIELD_ERROR_EMPTY
+                : error.equals(fieldConfig.getInvalidFieldErrorCode())
+                        ? ValidationConstants.FIELD_ERROR_INVALID
+                        : error.equals(fieldConfig.getFieldSemanticErrorCode())
+                                ? ValidationConstants.FIELD_ERROR_SEMANTIC
+                                : ValidationConstants.FIELD_VALIDATION_ERROR;
+        String vldnCriteria = fieldConfig.getFormat() == null
+                ? fieldConfig.getMinRange() + '-' + fieldConfig.getMaxRange()
+                : fieldConfig.getFormat();
+        FieldDataType fieldDataType = getFieldDataType(fieldConfig.getDataType());
+        String possibleValues = fieldConfig.getPossibleValues() != null && !fieldConfig.getPossibleValues().isEmpty()
+                ? fieldConfig.getPossibleValues().stream().collect(Collectors.joining(","))
+                : ValidationConstants.NO_POSSIBLE_VALUES_TO_VALIDATE_AGAINST;
+        String extractedValue = getStringVal(objVal);
+        
+        log.warn(
+                "\n*******************************************\n"
+                        + " ERROR_CODE : {}\n"
+                        + " FIELD_ID : {}\n"
+                        + " FIELD_EXT_PATH : {}\n"
+                        + " DATA_TYPE : {}\n"
+                        + " EXRACTED_VALUE : {}\n"
+                        + " REGEX|RANGE : {}\n"
+                        + " POSSIBLE VALUES : {}\n"
+                        + " ERROR_DESCRIPTION : {}\n"
+                        + "*******************************************",
+                error,
+                fieldConfig.getFieldId(),
+                fieldConfig
+                        .getFinalExtFieldPath(),
+                fieldDataType,
+                extractedValue,
+                vldnCriteria,
+                possibleValues,
+                errorType);
+    }
+    
+    private static void printErrorCode(VldnError e) {
+        log.warn("\nField Validation Error Codes are as follows:\n{}", e);
+        
+    }
+    
+    private static void addToVldnError(List<VldnError> errorCodes, String errorCode, FieldConfig fieldConfig,
+            Object objectVal) {
+        
+        if (fieldConfig.getFieldGroupErrorCode() == null || fieldConfig.getFieldGroupErrorCode().isBlank()) {
+            errorCodes.add(prepareBaseVldnError(fieldConfig, objectVal, errorCode));
+            return;
+        }
+        
+        List<VldnError> filteredErrorCodeList = errorCodes.stream()
+                .filter(e -> e.getErrorCode().equalsIgnoreCase(fieldConfig.getFieldGroupErrorCode()))
+                .collect(Collectors.toList());
+        
+        if (filteredErrorCodeList == null || filteredErrorCodeList.isEmpty())
+            errorCodes.add(prepareVldnErrorCode(fieldConfig, objectVal, errorCode));
+        else
+            filteredErrorCodeList.get(0).getErrors().add(prepareBaseVldnError(fieldConfig, objectVal, errorCode));
+    }
+    
+    private static VldnError prepareVldnErrorCode(FieldConfig fieldConfig, Object objectVal,
+            String fieldErrorCode) {
+        
+        if (fieldConfig.getFieldGroupErrorCode() == null || fieldConfig.getFieldGroupErrorCode().isBlank())
+            return prepareBaseVldnError(fieldConfig, objectVal, fieldErrorCode);
+        
+        VldnError vldnError = new VldnError();
+        vldnError.setErrorCode(fieldConfig.getFieldGroupErrorCode());
+        vldnError.getErrors().add(prepareBaseVldnError(fieldConfig, objectVal, fieldErrorCode));
+        return vldnError;
+        
+    }
+    
+    private static VldnError prepareBaseVldnError(FieldConfig fieldConfig, Object objectVal,
+            String fieldErrorCode) {
+        VldnError vldnError = new VldnError();
+        
+        vldnError.setErrorCode(fieldErrorCode);
+        
+        if (fieldConfig != null) {
+            vldnError.setExtFieldPath(fieldConfig.getFinalExtFieldPath());
+            vldnError.setFieldPattern(fieldConfig.getFormat());
+            vldnError.setFieldDataType(getFieldDataType(fieldConfig.getDataType()));
+            vldnError.setInstrId(fieldConfig.getInstrId());
+        }
+        vldnError.setReceivedValue(getStringVal(objectVal));
+        
+        return vldnError;
+    }
+    
+    private static FieldDataType getFieldDataType(int dataType) {
+        
+        if (FieldDataType.DATE.getValue() == dataType)
+            return FieldDataType.DATE;
+        
+        if (FieldDataType.DECIMAL.getValue() == dataType)
+            return FieldDataType.DECIMAL;
+        
+        if (FieldDataType.OBJECT.getValue() == dataType)
+            return FieldDataType.OBJECT;
+        
+        if (FieldDataType.STRING.getValue() == dataType)
+            return FieldDataType.STRING;
+        
+        if (FieldDataType.WHOLE_NUMBER.getValue() == dataType)
+            return FieldDataType.WHOLE_NUMBER;
+        
+        return null;
+        
+    }
+    
+    public static void main(String[] args) {
+        
+    }
+    
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    private static String getStringVal(Object objectVal) {
+        if (objectVal == null)
+            return null;
+        
+        if (isArray(objectVal))
+            return Arrays.toString((Object[]) objectVal);
+        
+        else if (isList(objectVal)) {
+            //return (String) ((List)objectVal).stream()
+            //   .collect(Collectors.joining(","));
+            return objectVal.toString();
+        }
+        
+        else if (isEnum(objectVal))
+            return objectVal.toString();
+        
+        return objectVal.toString();
+    }
+    
+    protected static Optional<String> validateExtractedFieldValue(FieldConfig fieldConfig,
+            Map<String, Object> extractedFields, Object objectToValidate) {
+        
+        if (fieldConfig == null) {
+            log.error("FieldConfig received as null");
+            return Optional.empty();
+        }
+        
+        if (isFieldMandatory(fieldConfig.getUsage())) {
+            if (objectToValidate == null)
+                return Optional.of(fieldConfig.getEmptyFieldErrorCode());
+            
+            return doFieldMandatoryValidation(fieldConfig, objectToValidate);
+            
+        } else if (isFieldConditional(fieldConfig.getUsage()))
+            return doSemanticValidation(fieldConfig, objectToValidate, extractedFields);
+        
+        // if optional. We would still need to do validation if values passed
+        else if (isFieldOptional(fieldConfig.getUsage()))
+            return doFieldOptionalValidation(fieldConfig, objectToValidate);
+        
+        // Empty Field Validations
+        // If Object is passed then we should throw an error
+        return doFieldEmptyValidation(fieldConfig, objectToValidate);
+        
+    }
+    
+    protected static Optional<String> doFieldEmptyValidation(FieldConfig fieldConfig, Object objectToValidate) {
+        return objectToValidate != null ? Optional.of(fieldConfig.getInvalidFieldErrorCode()) : Optional.empty();
+    }
+    
+    protected static Optional<String> doSemanticValidation(FieldConfig fieldConfig, Object objectToValidate,
+            Map<String, Object> extractedFields) {
+        
+        if (log.isDebugEnabled())
+            log.debug("doSemanticValidations");
+        
+        if (fieldConfig.getFieldSemanticConfig() == null
+                || fieldConfig.getFieldSemanticConfig().getFieldSemanticConfigMap() == null
+                || fieldConfig.getFieldSemanticConfig().getFieldSemanticConfigMap().isEmpty())
+            return Optional.empty();
+        
+        Optional<String> errorCode = Optional.empty();
+        
+        // iterate over to execute each Semantic Rule one by one
+        for (Entry<Integer, List<?>> entry : fieldConfig.getFieldSemanticConfig().getFieldSemanticConfigMap()
+                .entrySet()) {
+            if (errorCode.isPresent())
+                return errorCode;
+            
+            IFieldSemanticValidator validator = FieldValidatorFactory.getFieldSemanticValidator(entry.getKey());
+            
+            if (validator != null)
+                errorCode = validator.validateConditionalField(fieldConfig, entry.getValue(), objectToValidate,
+                        extractedFields);
+            else
+                log.error("Field Semantic Validator is empty against Sematic Type id: {}", entry.getKey());
+        }
+        
+        return errorCode;
+    }
+    
+    protected static Optional<String> doFieldOptionalValidation(FieldConfig fieldConfig, Object objectToValidate) {
+        if (log.isDebugEnabled())
+            if (objectToValidate != null)
+                log.debug("\n ****Doing Optional Validations-->field Name: " + fieldConfig.getFinalExtFieldPath()
+                        + " field type:" + objectToValidate.getClass() + "******");
+            
+        IFieldValidator validator = FieldValidatorFactory.getFieldValidator(objectToValidate);
+        return validator.validateOptionalField(fieldConfig, objectToValidate);
+    }
+    
+    protected static Optional<String> doFieldMandatoryValidation(FieldConfig fieldConfig, Object objectToValidate) {
+        if (log.isDebugEnabled())
+            log.debug("\n ****Doing Mandatory Validations-->field Name: " + fieldConfig.getFinalExtFieldPath()
+                    + " field type:" + objectToValidate.getClass() + "******");
+        
+        IFieldValidator validator = FieldValidatorFactory.getFieldValidator(objectToValidate);
+        return validator.validateMandatoryField(fieldConfig, objectToValidate);
+    }
+    
+    protected static boolean isFieldConditional(int usage) {
+        return usage == ValidationConstants.FIELD_USAGE_CONDITIONAL;
+    }
+    
+    protected static boolean isFieldOptional(int usage) {
+        return usage == ValidationConstants.FIELD_USAGE_OPTIONAL;
+    }
+    
+    protected static boolean isFieldMandatory(int usage) {
+        return usage == ValidationConstants.FIELD_USAGE_MANDATORY;
+    }
+    
+    protected static List<VldnError> addError(List<VldnError> errorCodeList, String errorCode) {
+        if (errorCodeList != null)
+            errorCodeList.add(prepareBaseVldnError(null, null, errorCode));
+        else {
+            errorCodeList = new ArrayList<>();
+            errorCodeList.add(prepareBaseVldnError(null, null, errorCode));
+        }
+        return errorCodeList;
+    }
+    
+    protected static Map<String, Object> extractFieldValues(List<FieldConfig> fieldConfigList, Object request)
+            throws NoSuchFieldException, SecurityException, IllegalArgumentException, IllegalAccessException {
+        Map<String, Object> extractedFields = new HashMap<String, Object>();
+        
+        String attributePartialName = new String(request.getClass().getSimpleName());
+        
+        if (log.isDebugEnabled())
+            log.debug("\nRoot Element is: " + attributePartialName);
+        
+        for (FieldConfig fieldConfig : fieldConfigList) {
+            if (log.isDebugEnabled())
+                log.debug("\n***Field Config Attribute name to be validated: " + fieldConfig.getFinalExtFieldPath()
+                        + "*****");
+            
+            String finalExtFieldPath = fieldConfig.getFinalExtFieldPath();
+            
+            String[] nestedAttributeArray = finalExtFieldPath.split("\\.");
+            
+            //	if(log.isDebugEnabled())
+            //		log.debug("****Split Attribute Array: *********");
+            //	Arrays.stream(nestedAttributeArray).forEach(s->log.debug(s));
+            
+            Object fieldValue = extractFieldValue(fieldConfig,
+                    Arrays.copyOfRange(nestedAttributeArray, 1, nestedAttributeArray.length), request);
+            
+            if (fieldValue != null)
+                extractedFields.put(fieldConfig.getFinalExtFieldPath(), fieldValue);
+            else
+                extractedFields.put(fieldConfig.getFinalExtFieldPath(), null);
+        }
+        
+        Map<String, Object> normalizedExtractedFields = new HashMap<String, Object>();
+        
+        // normalize the field value
+        // e.g value of type <List[4]<List[3]<List[2]>>> will return flat list of 24 elements.
+        extractedFields.forEach((k, v) -> normalizedExtractedFields.put(k, getNormalizedFieldValue(v)));
+        
+        if (log.isDebugEnabled()) {
+            log.debug("Exctracted Field Value Map: ");
+            extractedFields.forEach((k,
+                    v) -> log.debug("\n*******************************************\n Extracted Field Name : " + k
+                            + "\n Extracted Field Class: " + getInstanceType(v) + "\n Extracted Field Value:"
+                            + getExtractedFieldValue(v) + "\n********************************************"));
+        }
+        
+        return normalizedExtractedFields;
+    }
+    
+    protected static Object extractFieldValue(FieldConfig fieldConfig, String[] nestedAttributeArray,
+            Object objTobeValidated) throws SecurityException, IllegalArgumentException, IllegalAccessException {
+        
+        if (objTobeValidated == null) {
+            log.error("****Object received is null*****");
+            return null;
+        }
+        
+        Field fieldTobeValidated = null;
+        String filterExpression = null;
+        String filteredAttribute = null;
+        Object wrapperObjTobeValidated = null;
+        try {
+            wrapperObjTobeValidated = objTobeValidated;
+            
+            for (int i = 0; i < nestedAttributeArray.length; i++) {
+                if (wrapperObjTobeValidated == null)
+                    return null;
+                
+                if (log.isDebugEnabled())
+                    log.debug("\nWrapper Object Class:" + wrapperObjTobeValidated.getClass().getSimpleName()
+                            + " , attribute:" + nestedAttributeArray[i].trim());
+                
+                if (isFilterExpressionExists(nestedAttributeArray[i])) {
+                    filteredAttribute = extractOnlyAttribute(nestedAttributeArray[i]);
+                    filterExpression = extractFilterExpression(nestedAttributeArray[i]);
+                } else
+                    filteredAttribute = nestedAttributeArray[i];
+                
+                if (log.isDebugEnabled())
+                    log.debug("\n FilterAttribute: " + filteredAttribute + ", filterExpression :" + filterExpression);
+                
+                fieldTobeValidated = wrapperObjTobeValidated.getClass().getDeclaredField(filteredAttribute.trim());
+                fieldTobeValidated.setAccessible(true);
+                
+                Object nestedObjTobeValidated = fieldTobeValidated.get(wrapperObjTobeValidated);
+                wrapperObjTobeValidated = nestedObjTobeValidated;
+                
+                //			if(log.isDebugEnabled())
+                //				log.debug("\n2.Wrapper Object Class:" + wrapperObjTobeValidated.getClass().getSimpleName() + " , attribute:"+ nestedAttributeArray[i].trim());
+                
+                if (isList(wrapperObjTobeValidated))
+                    return getListValues(fieldConfig, wrapperObjTobeValidated,
+                            Arrays.copyOfRange(nestedAttributeArray, i + 1, nestedAttributeArray.length),
+                            filterExpression);
+                
+                if (isArray(wrapperObjTobeValidated))
+                    return getArrayValues(fieldConfig, wrapperObjTobeValidated,
+                            Arrays.copyOfRange(nestedAttributeArray, i + 1, nestedAttributeArray.length),
+                            filterExpression);
+                
+                if (isEnum(wrapperObjTobeValidated))
+                    return wrapperObjTobeValidated.toString();
+                
+            }
+            
+        } catch (NoSuchFieldException e) {
+            if (log.isDebugEnabled())
+                log.debug(
+                        "Ext Field Path is invalid : " + fieldConfig.getFinalExtFieldPath()
+                                + " so, returning null value.");
+            wrapperObjTobeValidated = null;
+        } catch (SecurityException | IllegalArgumentException | IllegalAccessException e) {
+            throw e;
+        } catch (Exception e) {
+            throw e;
+        }
+        return wrapperObjTobeValidated;
+    }
+    
+    /**
+     * @param wrapperObjTobeValidated
+     * @return
+     */
+    protected static boolean isEnum(Object wrapperObjTobeValidated) {
+        return wrapperObjTobeValidated != null && wrapperObjTobeValidated.getClass().isEnum();
+    }
+    
+    protected static boolean isArray(Object obj) {
+        return obj != null && obj.getClass().isArray();
+    }
+    
+    protected static boolean isList(Object obj) {
+        return obj != null && List.class.isAssignableFrom(obj.getClass());
+    }
+    
+    protected static String extractOnlyAttribute(String attribute) {
+        int lastStartIndex = attribute.lastIndexOf("[");
+        return (attribute != null && attribute.length() > 0 && lastStartIndex > -1)
+                ? attribute.substring(0, lastStartIndex)
+                : attribute;
+    }
+    
+    protected static String extractFilterExpression(String attribute) {
+        Matcher matcher = filterExpressionPattern.matcher(attribute);
+        return matcher.find() ? matcher.group() : null;
+    }
+    
+    protected static boolean isFilterExpressionExists(String attribute) {
+        //		int lastStartIndex = attribute.lastIndexOf("[");
+        //		int lastEndIndex = attribute.lastIndexOf("]");
+        //		return attribute != null && lastStartIndex > -1 && lastEndIndex > -1 && lastEndIndex - lastStartIndex > 0;
+        return filterExpressionPattern.matcher(attribute).find();
+    }
+    
+    protected static Object getArrayValues(FieldConfig fieldConfig, Object obj, String[] nestedAttributes,
+            String filterExpression)
+            throws IllegalArgumentException, IllegalAccessException, NoSuchFieldException, SecurityException {
+        if (log.isDebugEnabled()) {
+            log.debug("Wrapper Object:" + obj + "Remaining Nested Attributes:");
+            Arrays.stream(nestedAttributes).forEach(s -> log.debug(s));
+        }
+        Object[] thisArray = (Object[]) obj;
+        Object[] valueArray = new Object[thisArray.length];
+        
+        for (int i = 0; i < thisArray.length; i++) {
+            Object occurence = thisArray[i];
+            valueArray[i] = extractFieldValue(fieldConfig, nestedAttributes, occurence);
+        }
+        
+        valueArray = getFilteredArray(filterExpression, valueArray);
+        
+        return valueArray;
+    }
+    
+    protected static Object getListValues(FieldConfig fieldConfig, Object obj, String[] nestedAttributes,
+            String filterExpression)
+            throws IllegalArgumentException, IllegalAccessException, NoSuchFieldException, SecurityException {
+        if (log.isDebugEnabled()) {
+            log.debug("List: Wrapper Object:" + obj + "Remaining Nested Attributes:");
+            Arrays.stream(nestedAttributes).forEach(s -> log.debug(s));
+        }
+        
+        List<?> list = (List<?>) obj;
+        List<Object> valueList = new ArrayList<>();
+        
+        for (int i = 0; i < list.size(); i++) {
+            Object occurence = list.get(i);
+            valueList.add(extractFieldValue(fieldConfig, nestedAttributes, occurence));
+        }
+        if (log.isDebugEnabled())
+            log.debug("**valueList class:" + valueList.getClass().getName());
+        
+        valueList = getFilteredList(filterExpression, valueList);
+        return valueList;
+    }
+    
+    protected static List<Object> getFilteredList(String filterExpression, List<Object> valueList) {
+        if (filterExpression == null || filterExpression.isEmpty())
+            return valueList;
+        
+        if (valueList == null || valueList.isEmpty())
+            return valueList;
+        
+        String variable;
+        List<Object> finalValList = new ArrayList<>();
+        
+        variable = filterExpression.replaceAll("\\D+", "");
+        
+        if (log.isDebugEnabled()) {
+            log.debug("***Filtered Expression:" + filterExpression + "****");
+            log.debug("index:" + variable);
+        }
+        if (filterExpression.contains(ValidationConstants.FILTER_EXP_EQUAL_EQUALS)) {
+            if (isValidNumber(variable)) {
+                int index = Integer.parseInt(variable);
+                if (index != valueList.size() - 1) {
+                    log.error("Expected List Size (" + (index + 1) + ") is not equal to actual size ("
+                            + valueList.size() + ") , so returning empty List...");
+                    return null;
+                }
+            }
+        }
+        if (filterExpression.contains(ValidationConstants.FILTER_EXP_EQUAL)) {
+            if (isValidNumber(variable)) {
+                int index = Integer.parseInt(variable);
+                
+                if (valueList.size() - 1 < index)
+                    return null;
+                
+                finalValList.add(valueList.get(index));
+                return finalValList;
+            }
+        } else if (filterExpression.contains(ValidationConstants.FILTER_EXP_LESS_THAN_EQUAL)) {
+            if (isValidNumber(variable)) {
+                int index = Integer.parseInt(variable);
+                
+                if (valueList.size() - 1 <= index)
+                    return valueList;
+                else
+                    finalValList = new ArrayList<>(valueList.subList(0, index + 1));
+                
+                return finalValList;
+            }
+        } else if (filterExpression.contains(ValidationConstants.FILTER_EXP_LESS_THAN)) {
+            if (isValidNumber(variable)) {
+                int index = Integer.parseInt(variable);
+                
+                if (valueList.size() - 1 < index)
+                    return valueList;
+                else
+                    finalValList = new ArrayList<>(valueList.subList(0, index));
+                
+                return finalValList;
+            }
+        } else if (filterExpression.contains(ValidationConstants.FILTER_EXP_GREATER_THAN_EQUAL)) {
+            if (isValidNumber(variable)) {
+                int index = Integer.parseInt(variable);
+                
+                if (valueList.size() - 1 <= index - 1)
+                    return null;
+                else
+                    finalValList = new ArrayList<>(valueList.subList(index, valueList.size()));
+                
+                return finalValList;
+            }
+        } else if (filterExpression.contains(ValidationConstants.FILTER_EXP_GREATER_THAN)) {
+            if (isValidNumber(variable.trim())) {
+                int index = Integer.parseInt(variable.trim());
+                
+                if (valueList.size() - 1 <= index)
+                    return null;
+                else
+                    finalValList = new ArrayList<>(valueList.subList(index + 1, valueList.size()));
+                
+                return finalValList;
+            }
+        } else
+            log.debug("Not able to match filtered expression:" + filterExpression
+                    + ", returning the original list*******");
+        
+        return valueList;
+        
+    }
+    
+    protected static Object[] getFilteredArray(String filterExpression, Object[] valueArray) {
+        if (filterExpression == null || filterExpression.isEmpty())
+            return valueArray;
+        
+        if (valueArray == null || valueArray.length <= 0)
+            return valueArray;
+        
+        String variable;
+        Object[] finalValArray = new Object[valueArray.length];
+        
+        variable = filterExpression.replaceAll("\\D+", "");
+        
+        if (log.isDebugEnabled()) {
+            log.debug("***Filtered Expression:" + filterExpression + "****");
+            log.debug("index:" + variable);
+        }
+        if (filterExpression.contains(ValidationConstants.FILTER_EXP_EQUAL_EQUALS)) {
+            if (isValidNumber(variable)) {
+                int index = Integer.parseInt(variable);
+                if (index != valueArray.length - 1) {
+                    log.warn("Expected Array Size (" + index + 1
+                            + ") is not equal to actual size ("
+                            + valueArray.length + ") , so returning empty Array...");
+                    return null;
+                }
+            }
+        }
+        if (filterExpression.contains(ValidationConstants.FILTER_EXP_EQUAL)) {
+            if (isValidNumber(variable)) {
+                int index = Integer.parseInt(variable);
+                
+                if (valueArray.length - 1 < index)
+                    return null;
+                
+                finalValArray[0] = valueArray[index];
+                return finalValArray;
+            }
+        } else if (filterExpression.contains(ValidationConstants.FILTER_EXP_LESS_THAN_EQUAL)) {
+            if (isValidNumber(variable)) {
+                int index = Integer.parseInt(variable);
+                
+                if (valueArray.length - 1 <= index)
+                    return valueArray;
+                else
+                    finalValArray = Arrays.copyOfRange(valueArray, 0, index + 1);
+                
+                return finalValArray;
+            }
+        } else if (filterExpression.contains(ValidationConstants.FILTER_EXP_LESS_THAN)) {
+            if (isValidNumber(variable)) {
+                int index = Integer.parseInt(variable);
+                
+                if (valueArray.length - 1 < index)
+                    return valueArray;
+                else
+                    finalValArray = Arrays.copyOfRange(valueArray, 0, index);
+                
+                return finalValArray;
+            }
+        } else if (filterExpression.contains(ValidationConstants.FILTER_EXP_GREATER_THAN_EQUAL)) {
+            if (isValidNumber(variable)) {
+                int index = Integer.parseInt(variable);
+                
+                if (valueArray.length - 1 <= index - 1)
+                    return null;
+                else
+                    finalValArray = Arrays.copyOfRange(valueArray, index, valueArray.length);
+                
+                return finalValArray;
+            }
+        } else if (filterExpression.contains(ValidationConstants.FILTER_EXP_GREATER_THAN)) {
+            if (isValidNumber(variable.trim())) {
+                int index = Integer.parseInt(variable.trim());
+                
+                if (valueArray.length - 1 <= index)
+                    return null;
+                else
+                    finalValArray = Arrays.copyOfRange(valueArray, index + 1, valueArray.length);
+                
+                return finalValArray;
+            }
+        } else
+            log.warn("Not able to match filtered expression:"
+                    + filterExpression
+                    + ", returning the original array*******");
+        
+        return valueArray;
+        
+    }
+    
+    protected static boolean isValidNumber(String variable) {
+        return ValidatorUtil.notNullString.and(ValidatorUtil.notEmptyString).and(ValidatorUtil.numericString)
+                .test(variable).isValid();
+    }
+    
+    @SuppressWarnings("unchecked")
+    protected static String getExtractedFieldValue(Object v) {
+        List<Object> flatList = new ArrayList<>();
+        
+        if (v == null)
+            return null;
+        
+        if (isList(v.getClass()))
+            createFlatList((List<Object>) v, flatList);
+        if (v.getClass().isArray())
+            createFlatList((Object[]) v, flatList);
+        
+        if (!flatList.isEmpty()) {
+            if (log.isDebugEnabled())
+                log.debug("Extracted Field Value List size: " + flatList.size());
+            return flatList.toString();
+        }
+        return v.toString();
+    }
+    
+    @SuppressWarnings("unchecked")
+    protected static Object getNormalizedFieldValue(Object v) {
+        List<Object> flatList = new ArrayList<>();
+        
+        if (v == null)
+            return null;
+        
+        if (isList(v.getClass()))
+            createFlatList((List<Object>) v, flatList);
+        if (v.getClass().isArray())
+            createFlatList((Object[]) v, flatList);
+        
+        if (!flatList.isEmpty())
+            return flatList;
+        
+        return v;
+    }
+    
+    @SuppressWarnings("unchecked")
+    protected static void createFlatList(Object[] objArray, List<Object> flatList) {
+        if (objArray == null || objArray.length <= 0)
+            return;
+        for (Object obj : objArray) {
+            if (obj == null)
+                continue;
+            if (isList(obj.getClass()))
+                createFlatList((List<Object>) obj, flatList);
+            else if (obj.getClass().isArray())
+                createFlatList((Object[]) obj, flatList);
+            else
+                flatList.add(obj);
+            
+        }
+        
+    }
+    
+    @SuppressWarnings("unchecked")
+    protected static void createFlatList(List<Object> list, List<Object> flatList) {
+        if (list == null || list.isEmpty())
+            return;
+        
+        for (Object obj : list) {
+            if (obj == null)
+                continue;
+            
+            if (isList(obj.getClass()))
+                createFlatList((List<Object>) obj, flatList);
+            else if (obj.getClass().isArray())
+                createFlatList((Object[]) obj, flatList);
+            else
+                flatList.add(obj);
+            
+        }
+    }
+    
+    protected static String getInstanceType(Object v) {
+        if (v == null)
+            return null;
+        
+        if (v instanceof List)
+            return "List";
+        
+        if (v instanceof Enum)
+            return "Enum";
+        
+        if (v.getClass().isArray())
+            return "Array";
+        
+        return v.getClass().getSimpleName();
+    }
+}
